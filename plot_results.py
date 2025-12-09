@@ -2,86 +2,112 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import glob
 import os
+import re
 
 def plot_bytes_vs_interval():
-    # Load baseline CSVs for different intervals
+    print("Generating 'Bytes per Report vs Interval' plot...")
+    
+    # Matches: results_baseline_1s.csv, results_baseline_5s.csv, etc.
     files = glob.glob("results_baseline_*s.csv")
     data = []
     
     for f in files:
-        # Extract interval from filename (e.g., results_baseline_1s.csv)
-        interval = int(f.split('_')[-1].replace('s.csv', ''))
-        df = pd.read_csv(f)
-        
-        # Calculate Total Bytes per Report
-        # Header (12) + Payload (20) = 32 bytes (Fixed for Project 1)
-        # If your payload is variable, you'd need to calculate this dynamically.
-        avg_bytes = 32 
-        
-        data.append({'Interval': interval, 'BytesPerReport': avg_bytes})
+        try:
+            # Parse interval from filename (e.g. results_baseline_30s.csv)
+            # Regex extracts the digits before 's.csv'
+            match = re.search(r'_(\d+)s\.csv$', f)
+            if match:
+                interval = int(match.group(1))
+                
+                # Project spec: Header(12) + Payload(20) = 32 bytes
+                # (You could also sum the bytes from the CSV if you logged packet size)
+                avg_bytes = 32 
+                
+                data.append({'Interval': interval, 'BytesPerReport': avg_bytes})
+        except Exception as e:
+            print(f"Skipping {f}: {e}")
     
     if not data:
-        print("No baseline CSV files found for plotting.")
+        print("[WARN] No baseline CSVs found. Run experiments first.")
         return
 
     df_plot = pd.DataFrame(data).sort_values('Interval')
     
-    plt.figure(figsize=(8, 5))
-    plt.plot(df_plot['Interval'], df_plot['BytesPerReport'], marker='o', linestyle='-')
+    plt.figure(figsize=(10, 6))
+    plt.plot(df_plot['Interval'], df_plot['BytesPerReport'], marker='o', linestyle='-', color='#1f77b4', linewidth=2)
     plt.title('Bytes per Report vs Reporting Interval')
     plt.xlabel('Reporting Interval (seconds)')
-    plt.ylabel('Bytes per Report')
-    plt.grid(True)
+    plt.ylabel('Bytes per Report (Header + Payload)')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # Ensure all intervals are shown on X-axis
+    plt.xticks(df_plot['Interval'])
+    plt.ylim(0, max(df_plot['BytesPerReport']) * 1.2) # Add some headroom
+    
     plt.savefig('plot_bytes_vs_interval.png')
-    print("Generated plot_bytes_vs_interval.png")
+    print(" -> Saved 'plot_bytes_vs_interval.png'")
 
 def plot_duprate_vs_loss():
-    # Load loss scenario CSVs
-    # You might need to run experiments with 0%, 2%, 5%, 10% loss to get a line
-    # For now, we look for patterns like 'results_loss_*pct.csv'
-    files = glob.glob("results_loss_*pct.csv")
-    # Add baseline (0% loss)
+    print("Generating 'Duplicate Rate vs Loss' plot...")
+    
+    # 1. Find Loss Files (e.g. results_loss_2pct_1s.csv, results_loss_5pct_1s.csv)
+    files = glob.glob("results_loss_*pct_*.csv")
+    
+    # 2. Add Baseline (0% Loss) if it exists
     if os.path.exists("results_baseline_1s.csv"):
         files.append("results_baseline_1s.csv")
         
     data = []
-    
     for f in files:
-        df = pd.read_csv(f)
-        total_packets = len(df)
-        if total_packets == 0: continue
-        
-        # Determine loss % from filename
-        if "baseline" in f:
+        try:
+            df = pd.read_csv(f)
+            if len(df) == 0: continue
+            
+            # Determine Loss % from filename
             loss = 0
-        else:
-            # Extract loss from filename (e.g. results_loss_5pct.csv)
-            try:
-                loss = int(f.split('_')[-1].replace('pct.csv', ''))
-            except:
-                loss = 5 # Default fallback
+            if "loss" in f:
+                # Regex to find 'Xpct'
+                match = re.search(r'loss_(\d+)pct', f)
+                if match:
+                    loss = int(match.group(1))
+            elif "baseline" in f:
+                loss = 0
+            
+            # Calculate Duplicate Rate: (Count of Duplicate Flags / Total Packets)
+            # Ensure 'duplicate_flag' column exists
+            if 'duplicate_flag' in df.columns:
+                dup_count = df['duplicate_flag'].sum()
+                total_packets = len(df)
+                dup_rate = dup_count / total_packets if total_packets > 0 else 0
+                
+                data.append({'Loss': loss, 'DuplicateRate': dup_rate})
+            else:
+                print(f"[WARN] Column 'duplicate_flag' missing in {f}")
 
-        # Calculate Duplicate Rate
-        dup_count = df['duplicate_flag'].sum()
-        dup_rate = dup_count / total_packets
-        
-        data.append({'Loss': loss, 'DuplicateRate': dup_rate})
+        except Exception as e:
+            print(f"Error processing {f}: {e}")
 
     if not data:
-        print("No loss experiment CSV files found.")
+        print("[WARN] No data found for Loss plot.")
         return
 
+    # Sort by Loss percentage
     df_plot = pd.DataFrame(data).sort_values('Loss')
     
-    plt.figure(figsize=(8, 5))
-    plt.plot(df_plot['Loss'], df_plot['DuplicateRate'], marker='x', color='r')
+    plt.figure(figsize=(10, 6))
+    plt.plot(df_plot['Loss'], df_plot['DuplicateRate'], marker='s', linestyle='--', color='#d62728', linewidth=2)
     plt.title('Duplicate Rate vs Packet Loss')
     plt.xlabel('Packet Loss (%)')
-    plt.ylabel('Duplicate Rate')
-    plt.grid(True)
+    plt.ylabel('Duplicate Rate (Fraction)')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # Force integer ticks on X-axis
+    plt.xticks(df_plot['Loss'])
+    
     plt.savefig('plot_duprate_vs_loss.png')
-    print("Generated plot_duprate_vs_loss.png")
+    print(" -> Saved 'plot_duprate_vs_loss.png'")
 
 if __name__ == "__main__":
     plot_bytes_vs_interval()
     plot_duprate_vs_loss()
+    print("\nDone.")
