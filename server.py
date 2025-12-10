@@ -10,10 +10,10 @@ import sys
 from typing import Dict, Optional, Set
 
 # === Protocol Constants ===
+# CHANGED: Back to 'I' (4-byte int) -> Total 12 Bytes
 HEADER_FMT = "!BBHHIBB"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 PAYLOAD_FMT = "!fffff"
-PAYLOAD_SIZE = struct.calcsize(PAYLOAD_FMT)
 
 CSV_COLUMNS = [
     "device_id", "seq", "timestamp", "arrival_time", 
@@ -31,25 +31,22 @@ class DeviceState:
 device_states: Dict[int, DeviceState] = {}
 
 def process_packet(data: bytes, addr, csv_writer):
-    # [Metric] Start CPU timer
     start_cpu = time.process_time()
-    arrival_time = time.time()
+    arrival_time = time.time() # Full precision float
     
     if len(data) < HEADER_SIZE:
         return
 
     try:
         # Unpack Header
+        # send_ts is now the 32-bit truncated millis integer
         version, msg_type, device_id, seq_num, send_ts, batching_flag, checksum = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
     except struct.error:
         return
 
-    # Normalize types
     device_id = int(device_id)
     seq_num = int(seq_num)
-    send_ts = int(send_ts)
 
-    # State Tracking Flags
     duplicate_flag = 0
     gap_flag = 0
     out_of_order_flag = 0
@@ -74,18 +71,28 @@ def process_packet(data: bytes, addr, csv_writer):
             else:
                 out_of_order_flag = 1
 
-    # [Metric] Stop CPU timer
     end_cpu = time.process_time()
     cpu_ms = (end_cpu - start_cpu) * 1000.0
 
-    # Log to CSV (Using the open writer object)
-    csv_row = [device_id, seq_num, send_ts, arrival_time, duplicate_flag, gap_flag, out_of_order_flag, f"{cpu_ms:.4f}"]
+    # Log to CSV
+    # Note: 'timestamp' col contains the 32-bit truncated integer from client
+    #       'arrival_time' col contains the full server float
+    csv_row = [
+        device_id, 
+        seq_num, 
+        send_ts, 
+        f"{arrival_time:.6f}", 
+        duplicate_flag, 
+        gap_flag, 
+        out_of_order_flag, 
+        f"{cpu_ms:.4f}"
+    ]
+    
     try:
         csv_writer.writerow(csv_row)
     except Exception as e:
         print(f"[ERROR] CSV write failed: {e}")
 
-    # Console Output (Simplified to reduce I/O lag)
     if gap_flag: print(f"GAP DETECTED: Seq {seq_num}")
     if out_of_order_flag: print(f"LATE PACKET: Seq {seq_num}")
 
@@ -97,11 +104,10 @@ def server_loop(host: str, port: int, csv_path: str):
     
     print(f"=== Optimized Server Running on {host}:{port} ===")
     
-    # Open File ONCE
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(CSV_COLUMNS)
-        f.flush() # Ensure header is written
+        f.flush()
         
         print(f"=== Logging started: {csv_path} ===\n")
 
@@ -110,7 +116,7 @@ def server_loop(host: str, port: int, csv_path: str):
                 try:
                     data, addr = sock.recvfrom(4096)
                     process_packet(data, addr, writer)
-                    f.flush() # Flush buffer periodically to be safe
+                    f.flush()
                 except socket.timeout:
                     continue
                 except KeyboardInterrupt:
