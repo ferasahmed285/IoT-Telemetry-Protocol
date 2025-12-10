@@ -1,0 +1,3 @@
+device_id,seq,timestamp,arrival_time,duplicate_flag,gap_flag,cpu_ms_per_report
+1001,0,170207252,1765401765.908971,0,0,0.0414
+1001,1,170237828,1765401796.484990,0,0,0.0355

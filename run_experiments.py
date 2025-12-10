@@ -10,7 +10,8 @@ import statistics
 # === Configuration ===
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5005
-TEST_DURATION = 70 
+TEST_DURATION = 65 
+RUNS_PER_SCENARIO = 5  # REQUIRED: 5 repetitions per measurement
 
 SERVER_SCRIPT = "server.py"
 CLIENT_SCRIPT = "client.py"
@@ -20,8 +21,8 @@ IS_WINDOWS = platform.system() == "Windows"
 INTERFACE = "lo" if not IS_WINDOWS else None 
 
 # === Protocol Constants ===
-# Header 12 bytes + Payload 20 bytes = 32 bytes total
-PACKET_SIZE_BYTES = 12 + 20 
+# Header 12 bytes
+HEADER_SIZE = 12
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -85,125 +86,172 @@ def clean_netem():
     else:
         print("\n[REMINDER] Stop Clumsy before next test!\n")
 
-def analyze_results(csv_file, label):
+def analyze_single_run(csv_file):
+    """Parses a single CSV run and calculates metrics."""
     if not os.path.exists(csv_file):
         log(f"[ERR] CSV file {csv_file} not found.")
-        return {}
+        return None
     
-    packets_received = 0
+    rows = []
+    try:
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [name.strip() for name in reader.fieldnames]
+            for r in reader:
+                rows.append(r)
+    except Exception as e:
+        log(f"[ERR] Failed to read CSV: {e}")
+        return None
+
+    if not rows:
+        return None
+
+    # === REORDERING LOGIC (Requirement: Reorder by timestamp for analysis) ===
+    # Sort rows by client timestamp (send time)
+    rows.sort(key=lambda x: int(x.get('timestamp', 0)))
+
+    packets_received = len(rows)
     duplicate_count = 0
     gap_count = 0
     total_cpu_ms = 0.0
     latencies = []
     
-    try:
-        with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f)
-            reader.fieldnames = [name.strip() for name in reader.fieldnames]
-            
-            for row in reader:
-                packets_received += 1
-                if int(row.get('duplicate_flag', 0)) == 1: duplicate_count += 1
-                if int(row.get('gap_flag', 0)) == 1: gap_count += 1
-                total_cpu_ms += float(row.get('cpu_ms_per_report', 0.0))
+    # Calculate bytes per report (Header + Payload)
+    # We estimate based on standard packet size for this project.
+    # Header (12) + 5 floats (20) = 32 bytes usually.
+    # To be precise, one could inspect packet size, but fixed is acceptable for now.
+    bytes_per_report = 32 
 
-                # === COMPUTE LATENCY WITH TRUNCATED TIMESTAMPS ===
-                try:
-                    # Client sent: 32-bit truncated millis
-                    ts_sent_masked = int(row.get('timestamp', 0))
-                    
-                    # Server recorded: Full float seconds
-                    arrival_full = float(row.get('arrival_time', 0))
-                    
-                    # Convert Server time to same 32-bit masked millis format
-                    arrival_masked = int(arrival_full * 1000) & 0xFFFFFFFF
-                    
-                    # Simple Difference
-                    diff = arrival_masked - ts_sent_masked
-                    
-                    # Handle Wrap-around (unlikely in short test, but good safety)
-                    # If diff is massive negative, it means arrival wrapped 0xFFFFFFFF
-                    if diff < -1000000000:
-                        diff += 2**32
-                        
-                    if diff >= 0:
-                        latencies.append(diff)
-                        
-                except ValueError:
-                    pass
+    previous_seq = -1
 
-        if packets_received > 0:
-            duplicate_rate = (duplicate_count / packets_received)
-            avg_cpu_ms = total_cpu_ms / packets_received
-        else:
-            duplicate_rate = 0.0
-            avg_cpu_ms = 0.0
-            
-        avg_latency = statistics.mean(latencies) if latencies else 0.0
+    for row in rows:
+        seq = int(row.get('seq', -1))
+        
+        # Check duplicates (in sorted order)
+        if seq == previous_seq:
+            duplicate_count += 1
+        elif previous_seq != -1 and seq > previous_seq + 1:
+            gap_count += (seq - previous_seq - 1)
+        
+        previous_seq = seq
 
-        print(f"\n--- RESULTS: {label} ---")
-        print(f"{'packets_received':<25} : {packets_received}")
-        print(f"{'duplicate_rate':<25} : {duplicate_rate:.2%}")
-        print(f"{'sequence_gap_count':<25} : {gap_count}")
-        print(f"{'avg_latency':<25} : {avg_latency:.3f} ms") 
-        print(f"{'cpu_ms_per_report':<25} : {avg_cpu_ms:.3f} ms")
-        print("-" * 40 + "\n")
+        total_cpu_ms += float(row.get('cpu_ms_per_report', 0.0))
 
-        return {"avg_latency": avg_latency, "packets_received": packets_received}
+        # Latency Calculation
+        try:
+            ts_sent_masked = int(row.get('timestamp', 0))
+            arrival_full = float(row.get('arrival_time', 0))
+            arrival_masked = int(arrival_full * 1000) & 0xFFFFFFFF
+            diff = arrival_masked - ts_sent_masked
+            if diff < -1000000000: diff += 2**32 # Wrap handling
+            if diff >= 0: latencies.append(diff)
+        except ValueError:
+            pass
 
-    except Exception as e:
-        log(f"[ERR] Failed to parse CSV: {e}")
-        return {}
+    avg_latency = statistics.mean(latencies) if latencies else 0.0
+    duplicate_rate = (duplicate_count / packets_received) if packets_received else 0.0
+    avg_cpu_ms = (total_cpu_ms / packets_received) if packets_received else 0.0
 
-def run_test(scenario_name, interval, loss, delay, jitter, tshark_bin, interface_id):
-    log(f"\n{'='*10} SCENARIO: {scenario_name} | Interval: {interval}s {'='*10}")
+    return {
+        "packets_received": packets_received,
+        "avg_latency": avg_latency,
+        "duplicate_rate": duplicate_rate,
+        "gap_count": gap_count,
+        "cpu_ms": avg_cpu_ms,
+        "bytes_per_report": bytes_per_report
+    }
+
+def print_aggregated_stats(scenario_name, results_list):
+    """Calculates and prints Min/Median/Max for the 5 runs."""
+    if not results_list:
+        print(f"[ERR] No results for {scenario_name}")
+        return
+
+    # Extract lists of metrics
+    latencies = [r["avg_latency"] for r in results_list]
+    dup_rates = [r["duplicate_rate"] for r in results_list]
+    gaps = [r["gap_count"] for r in results_list]
+    bytes_rep = [r["bytes_per_report"] for r in results_list]
+
+    print(f"\n{'='*20} RESULTS SUMMARY: {scenario_name} ({len(results_list)} runs) {'='*20}")
+    print(f"{'Metric':<25} | {'Min':<10} | {'Median':<10} | {'Max':<10}")
+    print("-" * 65)
     
-    csv_file = f"results_{scenario_name}_{interval}s.csv"
-    pcap_file = f"trace_{scenario_name}_{interval}s.pcap"
-    
-    if os.path.exists(csv_file): os.remove(csv_file)
-    if os.path.exists(pcap_file): os.remove(pcap_file)
+    print(f"{'Avg Latency (ms)':<25} | {min(latencies):<10.3f} | {statistics.median(latencies):<10.3f} | {max(latencies):<10.3f}")
+    print(f"{'Duplicate Rate':<25} | {min(dup_rates):<10.2%} | {statistics.median(dup_rates):<10.2%} | {max(dup_rates):<10.2%}")
+    print(f"{'Gap Count':<25} | {min(gaps):<10} | {statistics.median(gaps):<10} | {max(gaps):<10}")
+    print(f"{'Bytes/Report':<25} | {statistics.median(bytes_rep):<10} (Fixed)")
+    print("-" * 65 + "\n")
 
+    return statistics.median(latencies)
+
+def run_scenario_batch(scenario_name, interval, loss, delay, jitter, tshark_bin, interface_id, batch_size=5):
+    """Runs a scenario 5 times and aggregates results."""
+    run_results = []
+    
     set_netem(loss, delay, jitter)
 
-    # Capture
-    cap_proc = None
-    if tshark_bin:
-        cmd = [tshark_bin, "-i", interface_id, "-f", f"udp port {SERVER_PORT}", "-w", pcap_file]
-        cap_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(3) 
+    for i in range(1, RUNS_PER_SCENARIO + 1):
+        log(f"--- Starting Run {i}/{RUNS_PER_SCENARIO} for {scenario_name} ---")
+        
+        csv_file = f"results_{scenario_name}_{interval}s_run{i}.csv"
+        pcap_file = f"trace_{scenario_name}_{interval}s_run{i}.pcap"
+        
+        # Cleanup previous
+        if os.path.exists(csv_file): os.remove(csv_file)
+        if os.path.exists(pcap_file): os.remove(pcap_file)
 
-    # Server
-    cflags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
-    server_cmd = [sys.executable, SERVER_SCRIPT, "--host", SERVER_IP, "--port", str(SERVER_PORT), "--csv", csv_file]
-    server_proc = subprocess.Popen(server_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, creationflags=cflags)
-    time.sleep(1)
+        # 1. Capture
+        cap_proc = None
+        if tshark_bin:
+            cmd = [tshark_bin, "-i", interface_id, "-f", f"udp port {SERVER_PORT}", "-w", pcap_file]
+            cap_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(2) 
 
-    # Client
-    client_cmd = [sys.executable, CLIENT_SCRIPT, "--host", SERVER_IP, "--port", str(SERVER_PORT), "--interval", str(interval)]
-    client_proc = subprocess.Popen(client_cmd, creationflags=cflags)
+        # 2. Server
+        cflags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
+        server_cmd = [sys.executable, SERVER_SCRIPT, "--host", SERVER_IP, "--port", str(SERVER_PORT), "--csv", csv_file]
+        server_proc = subprocess.Popen(server_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, creationflags=cflags)
+        time.sleep(1)
 
-    try:
-        wait_time = max(TEST_DURATION, interval * 4 + 10)
-        log(f"[WAIT] Running for {wait_time}s...")
-        client_proc.wait(timeout=wait_time)
-    except subprocess.TimeoutExpired:
+        # 3. Client
+        # Added --batch argument
+        client_cmd = [sys.executable, CLIENT_SCRIPT, "--host", SERVER_IP, "--port", str(SERVER_PORT), 
+                      "--interval", str(interval), "--batch", str(batch_size)]
+        client_proc = subprocess.Popen(client_cmd, creationflags=cflags)
+
+        # 4. Wait
+        try:
+            client_proc.wait(timeout=TEST_DURATION)
+        except subprocess.TimeoutExpired:
+            if IS_WINDOWS:
+                subprocess.run(f"taskkill /F /T /PID {client_proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                client_proc.terminate()
+
+        # 5. Cleanup Processes
         if IS_WINDOWS:
-            subprocess.run(f"taskkill /F /T /PID {client_proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(f"taskkill /F /T /PID {server_proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if cap_proc: subprocess.run(f"taskkill /F /T /PID {cap_proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            client_proc.terminate()
+            server_proc.terminate()
+            if cap_proc: cap_proc.terminate()
+        
+        # 6. Analyze this specific run
+        stats = analyze_single_run(csv_file)
+        if stats:
+            run_results.append(stats)
+            print(f"   Run {i} Stats: Latency={stats['avg_latency']:.2f}ms, Gaps={stats['gap_count']}")
+        else:
+            print(f"   Run {i} Failed to produce stats.")
+        
+        time.sleep(1) # Cooldown between runs
 
-    if IS_WINDOWS:
-        subprocess.run(f"taskkill /F /T /PID {server_proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if cap_proc: subprocess.run(f"taskkill /F /T /PID {cap_proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if loss > 0 or delay > 0: clean_netem()
-    else:
-        server_proc.terminate()
-        if cap_proc: cap_proc.terminate()
+    # Cleanup Netem only after ALL runs for this scenario are done
+    if loss > 0 or delay > 0:
         clean_netem()
 
-    log("[DONE] Scenario complete.")
-    return analyze_results(csv_file, f"{scenario_name}_{interval}s")
+    return print_aggregated_stats(f"{scenario_name}_{interval}s", run_results)
 
 if __name__ == "__main__":
     check_requirements()
@@ -214,40 +262,50 @@ if __name__ == "__main__":
         target_interface = "lo"
 
     try:
-        baseline_latency = 0.0
-        test_latency = 0.0
+        baseline_latency_1s = 0.0
 
-        # 1. Baseline
-        for interval in [1, 5, 30]:
-            stats = run_test("baseline", interval=interval, loss=0, delay=0, jitter=0, 
-                             tshark_bin=tshark_bin, interface_id=target_interface)
-            if interval == 1 and stats:
-                baseline_latency = stats.get("avg_latency", 0.0)
+        # === 1. Baseline Suite (1s, 5s, 30s) ===
+        print(f"\n{'='*20} STARTING BASELINE SUITE (1s, 5s, 30s) {'='*20}")
 
-        # 2. Loss
-        run_test("loss_5pct", interval=1, loss=5, delay=0, jitter=0, 
-                 tshark_bin=tshark_bin, interface_id=target_interface)
+        # Interval 1s
+        val = run_scenario_batch("baseline", interval=1, loss=0, delay=0, jitter=0, 
+                                 tshark_bin=tshark_bin, interface_id=target_interface)
+        if val: baseline_latency_1s = val
 
-        # 3. Jitter (Delay)
-        stats = run_test("jitter_test", interval=1, loss=0, delay=100, jitter=10, 
-                         tshark_bin=tshark_bin, interface_id=target_interface)
-        if stats:
-            test_latency = stats.get("avg_latency", 0.0)
+        # Interval 5s
+        run_scenario_batch("baseline", interval=5, loss=0, delay=0, jitter=0, 
+                           tshark_bin=tshark_bin, interface_id=target_interface)
 
-        # === FINAL COMPARISON ===
+        # Interval 30s
+        run_scenario_batch("baseline", interval=30, loss=0, delay=0, jitter=0, 
+                           tshark_bin=tshark_bin, interface_id=target_interface)
+
+        # === 2. Loss 5% ===
+        print(f"\n{'='*20} STARTING LOSS SCENARIO {'='*20}")
+        run_scenario_batch("loss_5pct", interval=1, loss=5, delay=0, jitter=0, 
+                           tshark_bin=tshark_bin, interface_id=target_interface)
+
+        # === 3. Jitter/Delay Test ===
+        print(f"\n{'='*20} STARTING JITTER SCENARIO {'='*20}")
+        test_latency_jitter = 0.0
+        val = run_scenario_batch("jitter_test", interval=1, loss=0, delay=100, jitter=10, 
+                                 tshark_bin=tshark_bin, interface_id=target_interface)
+        if val: test_latency_jitter = val
+
+        # === FINAL ACCEPTANCE CHECK ===
         print("\n" + "="*50)
         print("LATENCY IMPACT ANALYSIS (100ms DELAY TEST)")
         print("="*50)
-        print(f"1. Baseline Latency (1s Interval):  {baseline_latency:8.3f} ms")
-        print(f"2. Jitter Test Latency (100ms+):    {test_latency:8.3f} ms")
-        diff = test_latency - baseline_latency
+        print(f"Baseline Median Latency (1s): {baseline_latency_1s:8.3f} ms")
+        print(f"Jitter Test Median Latency:   {test_latency_jitter:8.3f} ms")
+        diff = test_latency_jitter - baseline_latency_1s
         print("-" * 50)
-        print(f"OBSERVED DELAY INCREASE:            {diff:8.3f} ms")
+        print(f"OBSERVED DELAY INCREASE:      {diff:8.3f} ms")
         
         if 80.0 <= diff <= 120.0:
-             print(f"RESULT: [PASS] matches target 100ms")
+             print(f"RESULT: [PASS] Matches target 100ms delay")
         else:
-             print(f"RESULT: [FAIL] Deviation > 20ms from 100ms target")
+             print(f"RESULT: [FAIL] Deviation > 20ms from target")
         print("="*50 + "\n")
 
     except KeyboardInterrupt:

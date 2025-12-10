@@ -1,5 +1,5 @@
-=== Optimized Server Running on 0.0.0.0:5005 ===
-=== Logging started: experiment_results.csv ===
+=== Server Listening on 0.0.0.0:5005 ===
+=== Logging to: server_log.csv ===
 
 
 Server stopped.

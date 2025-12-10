@@ -5,19 +5,19 @@ import csv
 import argparse
 import threading
 import signal
-import os
 import sys
-from typing import Dict, Optional, Set
+from typing import Dict, Set
 
 # === Protocol Constants ===
-# CHANGED: Back to 'I' (4-byte int) -> Total 12 Bytes
+# Header 12 Bytes: Ver(1), Type(1), ID(2), Seq(2), TS(4), Batch(1), Cksum(1) [cite: 28]
 HEADER_FMT = "!BBHHIBB"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
-PAYLOAD_FMT = "!fffff"
 
+# CSV Columns required by project description [cite: 46]
+# Added 'cpu_ms_per_report' as per "Metrics to Collect" table [cite: 59]
 CSV_COLUMNS = [
     "device_id", "seq", "timestamp", "arrival_time", 
-    "duplicate_flag", "gap_flag", "out_of_order_flag", "cpu_ms_per_report"
+    "duplicate_flag", "gap_flag", "cpu_ms_per_report"
 ]
 
 device_state_lock = threading.Lock()
@@ -32,14 +32,14 @@ device_states: Dict[int, DeviceState] = {}
 
 def process_packet(data: bytes, addr, csv_writer):
     start_cpu = time.process_time()
-    arrival_time = time.time() # Full precision float
+    arrival_time = time.time() # Server arrival time (float)
     
     if len(data) < HEADER_SIZE:
         return
 
     try:
         # Unpack Header
-        # send_ts is now the 32-bit truncated millis integer
+        # send_ts is the 32-bit truncated integer from client [cite: 35]
         version, msg_type, device_id, seq_num, send_ts, batching_flag, checksum = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
     except struct.error:
         return
@@ -49,7 +49,6 @@ def process_packet(data: bytes, addr, csv_writer):
 
     duplicate_flag = 0
     gap_flag = 0
-    out_of_order_flag = 0
 
     with device_state_lock:
         state = device_states.get(device_id)
@@ -58,25 +57,23 @@ def process_packet(data: bytes, addr, csv_writer):
             device_states[device_id] = state
 
         if seq_num in state.seen_seqs:
-            duplicate_flag = 1
+            duplicate_flag = 1 # [cite: 43]
         else:
             state.seen_seqs.add(seq_num)
-            if len(state.seen_seqs) > 1000:
+            # Prevent memory leak by keeping only recent history
+            if len(state.seen_seqs) > 2000:
                 state.seen_seqs.pop()
 
             if seq_num > state.highest_seq:
+                # Detect Gap (naive check, robust check is done in post-analysis) [cite: 44]
                 if state.highest_seq != -1 and seq_num > state.highest_seq + 1:
                     gap_flag = 1
                 state.highest_seq = seq_num
-            else:
-                out_of_order_flag = 1
 
     end_cpu = time.process_time()
     cpu_ms = (end_cpu - start_cpu) * 1000.0
 
-    # Log to CSV
-    # Note: 'timestamp' col contains the 32-bit truncated integer from client
-    #       'arrival_time' col contains the full server float
+    # Log to CSV [cite: 46]
     csv_row = [
         device_id, 
         seq_num, 
@@ -84,7 +81,6 @@ def process_packet(data: bytes, addr, csv_writer):
         f"{arrival_time:.6f}", 
         duplicate_flag, 
         gap_flag, 
-        out_of_order_flag, 
         f"{cpu_ms:.4f}"
     ]
     
@@ -93,23 +89,20 @@ def process_packet(data: bytes, addr, csv_writer):
     except Exception as e:
         print(f"[ERROR] CSV write failed: {e}")
 
-    if gap_flag: print(f"GAP DETECTED: Seq {seq_num}")
-    if out_of_order_flag: print(f"LATE PACKET: Seq {seq_num}")
-
 def server_loop(host: str, port: int, csv_path: str):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
     sock.settimeout(1.0)
     
-    print(f"=== Optimized Server Running on {host}:{port} ===")
+    print(f"=== Server Listening on {host}:{port} ===")
     
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(CSV_COLUMNS)
         f.flush()
         
-        print(f"=== Logging started: {csv_path} ===\n")
+        print(f"=== Logging to: {csv_path} ===\n")
 
         try:
             while not shutdown_event.is_set():
@@ -134,7 +127,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5005)
-    parser.add_argument("--csv", default="experiment_results.csv")
+    parser.add_argument("--csv", default="server_log.csv")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, handle_signal)
