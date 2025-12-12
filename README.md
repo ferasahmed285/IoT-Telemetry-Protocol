@@ -1,8 +1,6 @@
 ````markdown
 # IoTStream v1 — IoT Telemetry Protocol
 
-[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-blue?logo=github)](https://github.com/ferasahmed285/IoT-Telemetry-Protocol)
-
 **Course:** CSE361 - Computer Networks  
 **Phase:** 2 (Feature Completion & Tests)  
 **Protocol Name:** IoTStream v1  
