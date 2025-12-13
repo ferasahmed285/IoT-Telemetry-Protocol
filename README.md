@@ -1,13 +1,12 @@
 ````markdown
-# IoTStream v1 — IoT Telemetry Protocol
+# IoT Telemetry Protocol
 
 **Course:** CSE361 - Computer Networks  
-**Phase:** 2 (Feature Completion & Tests)  
-**Protocol Name:** IoTStream v1  
+**Phase:** 2 (Feature Completion & Tests)   
 **Repository:** [ferasahmed285/IoT-Telemetry-Protocol](https://github.com/ferasahmed285/IoT-Telemetry-Protocol)
 
 ## 📹 Project Demo Video
-**[]**
+**[in phase 3 submission]**
 
 ---
 
