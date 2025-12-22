@@ -6,7 +6,8 @@
 **Repository:** [ferasahmed285/IoT-Telemetry-Protocol](https://github.com/ferasahmed285/IoT-Telemetry-Protocol)
 
 ## 📹 Project Demo Video
-**[in phase 3 submission]**
+**[https://engasuedu-my.sharepoint.com/:v:/g/personal/23p0304_eng_asu_edu_eg/IQDzPxpnwp4ZTJxLIcChBtdAAVmzSpRav24tYaqqponHxRA?e=sGAISe&nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJTdHJlYW1XZWJBcHAiLCJyZWZlcnJhbFZpZXciOiJTaGFyZURpYWxvZy1MaW5rIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXcifX0%3D]**
+set as anyone with the link can view
 
 ---
 
