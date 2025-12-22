@@ -1,4 +1,3 @@
-````markdown
 # IoT Telemetry Protocol
 
 **Course:** CSE361 - Computer Networks  
@@ -136,6 +135,3 @@ To ensure experiments are reproducible, the script applies the following Linux `
   * **Sequence Integrity:** Pass (Continuous 1 -\> 60)
 
 <!-- end list -->
-
-```
-```
